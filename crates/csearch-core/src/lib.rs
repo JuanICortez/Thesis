@@ -7,3 +7,4 @@ pub mod abt;
 pub mod codebase;
 pub mod pattern;
 pub mod tree_sitter;
+pub mod simplified_ast;
