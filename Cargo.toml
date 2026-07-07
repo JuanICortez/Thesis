@@ -1,8 +1,8 @@
-[package]
-name = "thesis"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-tree-sitter = "0.26.8"
-tree-sitter-c = "0.24.2"
+[workspace]
+members = [
+    "crates/slotted-egraphs",
+    "crates/csearch-core",
+    "crates/csearch-cli",
+    "crates/csearch-py",
+]
+resolver = "2"

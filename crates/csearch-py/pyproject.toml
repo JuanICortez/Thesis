@@ -1,0 +1,12 @@
+[build-system]
+requires = ["maturin>=1.2,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "csearch"
+description = "Semantic code search for C using e-graphs"
+version = "0.1.0"
+authors = [
+    { name = "csearch", email = "juan.cortez@eclypsium.com" }
+]
+requires-python = ">=3.8"

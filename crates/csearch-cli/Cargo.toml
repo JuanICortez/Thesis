@@ -1,0 +1,7 @@
+[package]
+name = "csearch-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+csearch-core = { path = "../csearch-core" }

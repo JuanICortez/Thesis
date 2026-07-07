@@ -71,36 +71,34 @@ removes both problems.
 
 ---
 
-### A.3 — Position-tracking parser + `SpanTree` + span-aware insertion
+### A.3 — Position-tracking parser + `SpanTree` + span-aware insertion — *moved to the tool (see B.1.3)*
 
-**What.** Promote the generic mechanism from `tests/c_subset/spans.rs`:
+**Decision (revised).** This item is **no longer planned as library work.**
+Spans live in the consumer crate `csearch-core` (`src/span.rs`), not in
+`slotted-egraphs`. The generic mechanism that was originally slated for
+upstreaming —
 - `Span { start, end }`
 - `SpanTree { span, children }`
 - `parse_with_spans` (the position-tracking S-expression parser)
 - `add_expr_with_spans` (span-aware recursive insertion)
 
-**Why upstream.** Every consumer that wants source-level provenance
-needs the same plumbing. The S-expression parser is already in the
-library (`src/parse.rs`); a position-tracking variant fits there
-naturally. `SpanTree` and `add_expr_with_spans` are language-agnostic
-helpers that operate on any `RecExpr<L>`.
+— is being built tool-side instead. See **B.1.3** for the current home.
 
-**How.**
-- Add `Span` and `SpanTree` to a new `src/spans.rs` module.
-- Extend `src/parse.rs` with `parse_with_spans` alongside the existing
-  parser. The implementation can share most of the tokenizer; only
-  positions need to be carried.
-- `add_expr_with_spans<L, N>(eg, expr, spans, on_id)` should be generic
-  over `L: Language` and `N: Analysis<L>`. Use a callback instead of
-  hard-coding any specific analysis — let the consumer decide what to
-  do with each `(AppliedId, Span)` pair (typically: insert into their
-  own analysis data).
+**Why the change.** The original rationale for upstreaming was that
+every consumer needs the same source-provenance plumbing. In practice
+the tool's position type is already richer than a minimal library `Span`
+(multi-file `file_id`, byte range, and eventually row/col — see Part C.1),
+so the library `Span` would only ever be a stepping stone the tool
+immediately wraps. Rather than maintain a minimal `Span`/`SpanTree` in
+the library that no consumer uses directly, we keep the whole mechanism
+in `csearch-core` where it can evolve with the tool's needs.
 
-**Caveat.** The library shouldn't tie itself to a specific Span analysis
-because consumers may have richer position types (multi-file, row/col,
-etc.). Keep the library Span minimal; the *pattern* is what we provide.
+**What stays generic.** `add_expr_with_spans` remains generic over
+`L: Language` and `N: Analysis<L>` and uses a callback so it doesn't hard-code
+any specific analysis — but it lives in `csearch-core`, not the library. If a
+second consumer ever needs the same plumbing, revisit upstreaming then.
 
-**Estimated effort.** Medium. ~150 lines in the library + tests.
+**Estimated effort.** Medium. ~150 lines, now tool-side in `csearch-core`.
 
 ---
 
@@ -183,8 +181,10 @@ C-language-agnostic, so they don't belong in the library.
 Both analyses are written *over `CSubset`*. They need to know about
 `CSubset::Num`, `CSubset::Add`, etc. They live in the consumer crate.
 
-`SpanAnalysis` will use the library's `SpanTree` infrastructure
-(Part A.3) but the actual `Analysis<CSubset>` impl stays C-specific.
+`SpanAnalysis` builds on the crate-local span infrastructure — `Span`,
+`SpanTree`, `parse_with_spans`, `add_expr_with_spans` in
+`csearch-core/src/span.rs` (formerly slated for the library as Part A.3,
+now tool-side). The `Analysis<CSubset>` impl itself stays C-specific.
 
 #### B.1.4 — Tree-sitter integration (`tree_sitter.rs`, `lower.rs`)
 
@@ -304,9 +304,10 @@ tool. They influence the design and may inform priority.
    first commit; gets used immediately by the tool.
 2. **Library upstream — A.2 (`semantic_search`).** Enables the tool's
    query API to depend on it directly instead of vendoring.
-3. **Library upstream — A.3 (spans / `parse_with_spans` / `add_expr_with_spans`).**
-   The big infrastructure piece. Makes the tool's `SpanAnalysis` a
-   thin layer on top.
+3. **Tool — spans (`Span` / `SpanTree` / `parse_with_spans` / `add_expr_with_spans`).**
+   The big infrastructure piece, now built tool-side in
+   `csearch-core/src/span.rs` (formerly Part A.3). Underpins the tool's
+   `SpanAnalysis`.
 4. **Tool — B.1.1, B.1.2, B.1.3.** Move `CSubset`, rewrites, analyses
    into the new crate, depending on the freshly-upstreamed library
    helpers.

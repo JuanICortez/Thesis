@@ -1,0 +1,11 @@
+[package]
+name = "csearch-py"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+csearch-core = { path = "../csearch-core" }
+pyo3 = { version = "0.21", features = ["extension-module"] }
+
+[lib]
+crate-type = ["cdylib"]

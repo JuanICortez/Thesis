@@ -1,0 +1,11 @@
+[package]
+name = "csearch-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slotted-egraphs = { path = "../slotted-egraphs" }
+tree-sitter = "0.26.9"
+tree-sitter-c = "0.24.2"
+
+[dev-dependencies]
