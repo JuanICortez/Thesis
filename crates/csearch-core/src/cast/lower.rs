@@ -51,48 +51,56 @@ impl<'a> ASTBuilder<'a> {
     /// innermost node is an `identifier`, so this recurses rather than
     /// asserting. The `usize` is the pointer depth stripped on the way down;
     /// callers currently discard it, since the CAst does not model types yet.
-    fn unwrap_declarator(&self, node: Node) -> (Identifier, usize) {
+    fn unwrap_declarator(&self, node: Node) -> Option<(Identifier, usize)> {
         match node.kind() {
-            "identifier" => (self.extract_identifier(node), 0),
+            "identifier" => Some((self.extract_identifier(node), 0)),
             "pointer_declarator" => {
-                let inner = node
-                    .child_by_field_name("declarator")
-                    .expect("Inner declarator of pointer_declarator");
-                let (name, depth) = self.unwrap_declarator(inner);
-                (name, depth + 1)
+                let inner = node.child_by_field_name("declarator")?;
+                let (name, depth) = self.unwrap_declarator(inner)?;
+                Some((name, depth + 1))
             }
             "array_declarator" | "function_declarator" => {
-                let inner = node
-                    .child_by_field_name("declarator")
-                    .expect("Inner declarator");
+                let inner = node.child_by_field_name("declarator")?;
                 self.unwrap_declarator(inner)
             }
             "parenthesized_declarator" => {
-                let inner = node
-                    .named_child(0)
-                    .expect("Inner declarator of parenthesized_declarator");
+                let inner = node.named_child(0)?;
                 self.unwrap_declarator(inner)
             }
-            _ => panic!("Unknown declarator kind: {}", node.kind()),
+            _ => None,
         }
     }
 
-    fn extract_number(&self, node: Node) -> i64 {
+    /// Parses an integer literal, honouring the C radix prefixes and the
+    /// `u`/`l` suffixes. Returns `None` for anything that is not an integer
+    /// this can represent exactly — floats, character constants, overflow —
+    /// so the caller can mark it unsupported instead of silently reading it
+    /// as `0`.
+    fn extract_number(&self, node: Node) -> Option<i64> {
         assert_eq!(node.kind(), "number_literal");
         let text = self.extract_text(node);
-        text.parse::<i64>().unwrap_or_default()
+        let text = text.trim_end_matches(['u', 'U', 'l', 'L']);
+
+        let (digits, radix) = match text.get(..2) {
+            Some("0x") | Some("0X") => (&text[2..], 16),
+            Some("0b") | Some("0B") => (&text[2..], 2),
+            _ if text.len() > 1 && text.starts_with('0') && !text.contains(['.', 'e', 'E']) => {
+                (&text[1..], 8)
+            }
+            _ => (text, 10),
+        };
+
+        i64::from_str_radix(digits, radix).ok()
     }
 
-    fn get_operation(&self, node: Node) -> BinOp {
-        let operator = node
-            .child_by_field_name("operator")
-            .expect("Operator field in node");
+    fn get_operation(&self, node: Node) -> Option<BinOp> {
+        let operator = node.child_by_field_name("operator")?;
         match self.extract_text(operator).as_str() {
-            "+" => BinOp::Add,
-            "-" => BinOp::Sub,
-            "*" => BinOp::Mul,
-            "/" => BinOp::Div,
-            _ => panic!("Unknown binary operator: {}", node.kind()),
+            "+" => Some(BinOp::Add),
+            "-" => Some(BinOp::Sub),
+            "*" => Some(BinOp::Mul),
+            "/" => Some(BinOp::Div),
+            _ => None,
         }
     }
 
@@ -109,7 +117,9 @@ impl<'a> ASTBuilder<'a> {
 
         for child in root.named_children(&mut cursor) {
             if child.kind() == "function_definition" {
-                functions.push(self.build_function(child));
+                if let Some(function) = self.build_function(child) {
+                    functions.push(function);
+                }
             }
         }
         TranslationUnit {
@@ -118,16 +128,13 @@ impl<'a> ASTBuilder<'a> {
         }
     }
 
-    fn build_function(&self, node: Node) -> Function {
+    fn build_function(&self, node: Node) -> Option<Function> {
         assert_eq!(node.kind(), "function_definition");
 
-        let declarator = node
-            .child_by_field_name("declarator")
-            .expect("Function Declarator");
+        let declarator = node.child_by_field_name("declarator")?;
+        let (name, params) = self.deconstruct_declarator(declarator)?;
 
-        let (name, params) = self.deconstruct_declarator(declarator);
-
-        let body = node.child_by_field_name("body").expect("Function Body");
+        let body = node.child_by_field_name("body")?;
         let mut statements = Vec::new();
         let mut cursor = body.walk();
 
@@ -135,7 +142,7 @@ impl<'a> ASTBuilder<'a> {
             statements.extend(self.build_statement(child));
         }
 
-        Function {
+        Some(Function {
             name,
             params,
             body: Compound {
@@ -143,35 +150,38 @@ impl<'a> ASTBuilder<'a> {
                 span: self.span(body),
             },
             span: self.span(node),
-        }
+        })
     }
 
-    fn deconstruct_declarator(&self, node: Node) -> (Identifier, Vec<Identifier>) {
-        assert_eq!(node.kind(), "function_declarator");
+    /// `None` when the definition has no name we can resolve — `int (*f(void))(int)`
+    /// and friends. Unnamed parameters (`void f(int)`) make the whole
+    /// parameter list `None` rather than silently changing the arity.
+    fn deconstruct_declarator(&self, node: Node) -> Option<(Identifier, Vec<Identifier>)> {
+        if node.kind() != "function_declarator" {
+            return None;
+        }
 
-        let name_node = node
-            .child_by_field_name("declarator")
-            .expect("Function Identifier");
-        let (name, _pointer_depth) = self.unwrap_declarator(name_node);
+        let (name, _pointer_depth) =
+            self.unwrap_declarator(node.child_by_field_name("declarator")?)?;
 
-        let params = if let Some(param_list) = node.child_by_field_name("parameters") {
-            let mut param_identifiers = Vec::new();
-            let mut cursor = param_list.walk();
+        let params = match node.child_by_field_name("parameters") {
+            Some(param_list) => {
+                let mut param_identifiers = Vec::new();
+                let mut cursor = param_list.walk();
 
-            for child in param_list.named_children(&mut cursor) {
-                if child.kind() == "parameter_declaration" {
-                    let param_node = child
-                        .child_by_field_name("declarator")
-                        .expect("Parameter Declarator");
-                    let (param_identifier, _pointer_depth) = self.unwrap_declarator(param_node);
-                    param_identifiers.push(param_identifier);
+                for child in param_list.named_children(&mut cursor) {
+                    if child.kind() == "parameter_declaration" {
+                        let param_node = child.child_by_field_name("declarator")?;
+                        let (param_identifier, _pointer_depth) =
+                            self.unwrap_declarator(param_node)?;
+                        param_identifiers.push(param_identifier);
+                    }
                 }
+                param_identifiers
             }
-            param_identifiers
-        } else {
-            Vec::new()
+            None => Vec::new(),
         };
-        (name, params)
+        Some((name, params))
     }
 
     fn build_statement(&self, node: Node) -> Vec<Statement> {
@@ -180,18 +190,26 @@ impl<'a> ASTBuilder<'a> {
             "declaration" => self
                 .process_declaration(node)
                 .into_iter()
-                .map(|(name, value)| Statement::new(StmtKind::Declaration { name, value }, span))
+                .map(|kind| Statement::new(kind, span))
                 .collect(),
             "expression_statement" => vec![self.process_expression_statement(node)],
             "return_statement" => vec![Statement::new(
                 StmtKind::Return(node.named_child(0).map(|e| self.build_expression(e))),
                 span,
             )],
-            _ => Vec::new(),
+            kind => vec![Statement::new(
+                StmtKind::Unsupported {
+                    kind: kind.to_string(),
+                },
+                span,
+            )],
         }
     }
 
-    fn process_declaration(&self, node: Node) -> Vec<(Identifier, Option<Expression>)> {
+    /// One `StmtKind` per declarator, so `int a, b = 2;` yields two. Splitting
+    /// them into separate statements is stage 2's job; this only reports what
+    /// the declarator list contains.
+    fn process_declaration(&self, node: Node) -> Vec<StmtKind> {
         assert_eq!(node.kind(), "declaration");
 
         let mut declarations = Vec::new();
@@ -200,97 +218,112 @@ impl<'a> ASTBuilder<'a> {
         let declarators = node.children_by_field_name("declarator", &mut cursor);
 
         for declarator in declarators {
-            match declarator.kind() {
-                "init_declarator" => {
-                    let (identifier, _pointer_depth) = self.unwrap_declarator(
-                        declarator
-                            .child_by_field_name("declarator")
-                            .expect("Declaration Identifier"),
-                    );
-                    let value = self.build_expression(
-                        declarator
-                            .child_by_field_name("value")
-                            .expect("Declaration Value"),
-                    );
-                    declarations.push((identifier, Some(value)));
+            declarations.push(self.process_declarator(declarator).unwrap_or_else(|| {
+                StmtKind::Unsupported {
+                    kind: declarator.kind().to_string(),
                 }
-                // Everything else is an uninitialized declarator: `int a;`,
-                // `int *p;`, `int a[10];`, `int (*f)(void);`
-                _ => {
-                    let (identifier, _pointer_depth) = self.unwrap_declarator(declarator);
-                    declarations.push((identifier, None));
-                }
-            }
+            }));
         }
         declarations
     }
 
+    fn process_declarator(&self, declarator: Node) -> Option<StmtKind> {
+        match declarator.kind() {
+            "init_declarator" => {
+                let (name, _pointer_depth) =
+                    self.unwrap_declarator(declarator.child_by_field_name("declarator")?)?;
+                let value = self.build_expression(declarator.child_by_field_name("value")?);
+                Some(StmtKind::Declaration {
+                    name,
+                    value: Some(value),
+                })
+            }
+            // Everything else is an uninitialized declarator: `int a;`,
+            // `int *p;`, `int a[10];`, `int (*f)(void);`
+            _ => {
+                let (name, _pointer_depth) = self.unwrap_declarator(declarator)?;
+                Some(StmtKind::Declaration { name, value: None })
+            }
+        }
+    }
+
     fn process_expression_statement(&self, node: Node) -> Statement {
         assert_eq!(node.kind(), "expression_statement");
+        let span = self.span(node);
 
-        let expression_child = node
-            .named_child(0)
-            .expect("Expression Statement to have child");
+        // An empty statement (`;`) has no child.
+        let Some(expression_child) = node.named_child(0) else {
+            return Statement::new(
+                StmtKind::Unsupported {
+                    kind: node.kind().to_string(),
+                },
+                span,
+            );
+        };
 
-        match expression_child.kind() {
+        let kind = self
+            .build_expression_statement_kind(expression_child)
+            .unwrap_or_else(|| StmtKind::Unsupported {
+                kind: expression_child.kind().to_string(),
+            });
+        Statement::new(kind, span)
+    }
+
+    fn build_expression_statement_kind(&self, node: Node) -> Option<StmtKind> {
+        match node.kind() {
             "assignment_expression" => {
-                let lhs = expression_child
-                    .child_by_field_name("left")
-                    .expect("Left Hand Side expression in Assignment");
-                let rhs = expression_child
-                    .child_by_field_name("right")
-                    .expect("Right Hand Side expression in Assignment");
+                let lhs = node.child_by_field_name("left")?;
+                let rhs = node.child_by_field_name("right")?;
 
-                // `a += b` and friends are *not* plain assignments. Modelling
-                // them as one would silently drop the operator; desugaring is
-                // stage 2's job. Loud until stage 1 grows an `Unsupported`.
-                let operator = expression_child
-                    .child_by_field_name("operator")
-                    .expect("Operator field in Assignment");
-                assert_eq!(
-                    self.extract_text(operator),
-                    "=",
-                    "compound assignment is not modelled yet"
-                );
+                // `a += b` is not a plain assignment — modelling it as one
+                // would silently drop the operator. Desugaring is stage 2's
+                // job, so anything but `=` is unsupported here.
+                let operator = node.child_by_field_name("operator")?;
+                if self.extract_text(operator) != "=" {
+                    return None;
+                }
 
-                Statement::new(
-                    StmtKind::Assign {
-                        lhs: self.build_expression(lhs),
-                        rhs: self.build_expression(rhs),
-                    },
-                    self.span(node),
-                )
+                Some(StmtKind::Assign {
+                    lhs: self.build_expression(lhs),
+                    rhs: self.build_expression(rhs),
+                })
             }
-            _ => Statement::new(
-                StmtKind::ExprStmt(self.build_expression(expression_child)),
-                self.span(node),
-            ),
+            _ => Some(StmtKind::ExprStmt(self.build_expression(node))),
         }
     }
 
     fn build_expression(&self, node: Node) -> Expression {
         let span = self.span(node);
-        let kind = match node.kind() {
-            "identifier" => ExprKind::Variable(self.extract_identifier(node)),
-            "number_literal" => ExprKind::Int(self.extract_number(node)),
-            "binary_expression" => {
-                let lhs = node
-                    .child_by_field_name("left")
-                    .expect("Left Hand Side in Binary Expression");
-                let rhs = node
-                    .child_by_field_name("right")
-                    .expect("Right Hand Side in Binary Expression");
+        let kind = self
+            .build_expression_kind(node)
+            .unwrap_or_else(|| self.unsupported_expr_kind(node));
+        Expression::new(kind, span)
+    }
 
-                ExprKind::BinaryOp {
-                    op: self.get_operation(node),
+    /// `None` means "stage 1 cannot model this node", which the caller turns
+    /// into [`ExprKind::Unsupported`]. Every `?` in here is a construct we do
+    /// not handle yet, not an internal error.
+    fn build_expression_kind(&self, node: Node) -> Option<ExprKind> {
+        match node.kind() {
+            "identifier" => Some(ExprKind::Variable(self.extract_identifier(node))),
+            "number_literal" => Some(ExprKind::Int(self.extract_number(node)?)),
+            "binary_expression" => {
+                let lhs = node.child_by_field_name("left")?;
+                let rhs = node.child_by_field_name("right")?;
+
+                Some(ExprKind::BinaryOp {
+                    op: self.get_operation(node)?,
                     lhs: Box::new(self.build_expression(lhs)),
                     rhs: Box::new(self.build_expression(rhs)),
-                }
+                })
             }
             "call_expression" => {
-                let callee = node
-                    .child_by_field_name("function")
-                    .expect("Function Name in Call Expression");
+                let callee = node.child_by_field_name("function")?;
+                // Calls through a pointer or a member (`f->cb(x)`) are not
+                // modelled: the callee is an `Identifier`, not an expression.
+                if callee.kind() != "identifier" {
+                    return None;
+                }
                 let args = node
                     .child_by_field_name("arguments")
                     .map_or(Vec::new(), |args_list| {
@@ -300,21 +333,26 @@ impl<'a> ASTBuilder<'a> {
                             .collect()
                     });
 
-                ExprKind::Call {
+                Some(ExprKind::Call {
                     callee: self.extract_identifier(callee),
                     args,
-                }
+                })
             }
-            _ => todo!("Unknown Expression"),
-        };
-        Expression::new(kind, span)
+            _ => None,
+        }
+    }
+
+    fn unsupported_expr_kind(&self, node: Node) -> ExprKind {
+        ExprKind::Unsupported {
+            kind: node.kind().to_string(),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cast::{ExprKind, StmtKind};
+    use crate::cast::{collect_unsupported, ExprKind, StmtKind};
     use tree_sitter::Parser;
 
     fn lower(src: &str) -> TranslationUnit {
@@ -378,4 +416,102 @@ mod tests {
             other => panic!("expected Return, got {other:?}"),
         }
     }
+
+    // ---- Stage 1 totality (step 2) ----
+
+    #[test]
+    fn unmodelled_statements_become_unsupported() {
+        let unit = lower("int f() { for (;;) { } goto end; }");
+        let kinds: Vec<_> = unit.functions[0]
+            .body
+            .statements
+            .iter()
+            .map(|s| match &s.kind {
+                StmtKind::Unsupported { kind } => kind.clone(),
+                other => panic!("expected Unsupported, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["for_statement", "goto_statement"]);
+    }
+
+    #[test]
+    fn compound_assignment_is_unsupported_not_mistranslated() {
+        let unit = lower("int f() { int a; a += 2; }");
+        assert!(matches!(
+            &unit.functions[0].body.statements[1].kind,
+            StmtKind::Unsupported { kind } if kind == "assignment_expression"
+        ));
+    }
+
+    #[test]
+    fn unmodelled_expressions_become_unsupported() {
+        let unit = lower(r#"int f() { return "hi"; }"#);
+        match &unit.functions[0].body.statements[0].kind {
+            StmtKind::Return(Some(e)) => assert!(matches!(
+                &e.kind,
+                ExprKind::Unsupported { kind } if kind == "string_literal"
+            )),
+            other => panic!("expected Return, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn integer_literals_parse_by_radix() {
+        let unit = lower("int f() { int a = 0x1f; int b = 010; int c = 42u; int d = 1.5; }");
+        let values: Vec<_> = unit.functions[0]
+            .body
+            .statements
+            .iter()
+            .map(|s| match &s.kind {
+                StmtKind::Declaration { value: Some(v), .. } => v.kind.clone(),
+                other => panic!("expected initialised Declaration, got {other:?}"),
+            })
+            .collect();
+        assert!(matches!(values[0], ExprKind::Int(31)));
+        assert!(matches!(values[1], ExprKind::Int(8)));
+        assert!(matches!(values[2], ExprKind::Int(42)));
+        // A float is not an i64 — better unsupported than silently 0.
+        assert!(matches!(&values[3], ExprKind::Unsupported { kind } if kind == "number_literal"));
+    }
+
+    #[test]
+    fn collect_unsupported_reports_kind_and_span() {
+        let src = "int f() { while (1) { } return 1 + \"x\"; }";
+        let found = collect_unsupported(&lower(src));
+        let reported: Vec<_> = found
+            .iter()
+            .map(|u| (u.kind.as_str(), u.span.slice(src)))
+            .collect();
+        assert_eq!(
+            reported,
+            [
+                ("while_statement", "while (1) { }"),
+                ("string_literal", "\"x\""),
+            ]
+        );
+    }
+
+    /// The stage-1 contract: total, and never panics.
+    #[test]
+    fn lowering_never_panics_on_awkward_input() {
+        let sources = [
+            "",
+            "int;",
+            "void f(int) { }",
+            "int (*f(void))(int) { }",
+            "struct S { int x; }; int g(struct S *s) { return s->x; }",
+            "typedef int myint; myint h(void) { myint v = 1; return v; }",
+            "#define M 1\nint i(void) { return M; }",
+            "int j(void) { int *p, **q, a[3]; p = &a[0]; return **q; }",
+            "int k(void) { switch (1) { case 1: break; default: ; } return 0; }",
+            "int l(void) { f->cb(1); (*g)(2); return 0; }",
+            "int broken(void) { int a = ; return",
+        ];
+        for src in sources {
+            let unit = lower(src);
+            // Exercising the walker too — it must not panic either.
+            let _ = collect_unsupported(&unit);
+        }
+    }
 }
+

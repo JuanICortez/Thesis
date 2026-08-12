@@ -59,6 +59,13 @@ pub enum StmtKind {
     ExprStmt(Expression),
 
     Return(Option<Expression>),
+
+    /// A statement stage 1 does not model yet. Carries the tree-sitter node
+    /// kind that produced it. Lowering never drops input silently; stage 3
+    /// turns these into hard errors.
+    Unsupported {
+        kind: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -91,11 +98,81 @@ pub enum ExprKind {
         callee: Identifier,
         args: Vec<Expression>,
     },
+
+    /// An expression stage 1 does not model yet. See [`StmtKind::Unsupported`].
+    Unsupported {
+        kind: String,
+    },
 }
 
 impl Statement {
     pub fn new(kind: StmtKind, span: Span) -> Self {
         Statement { kind, span }
+    }
+}
+
+/// A construct stage 1 could not model, as reported by [`collect_unsupported`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsupported {
+    /// The tree-sitter node kind, e.g. `"for_statement"`.
+    pub kind: String,
+    pub span: Span,
+}
+
+/// Walks a unit and reports everything lowering could not model.
+///
+/// Kept separate from lowering so the main path stays clean. Counting these
+/// over a corpus is what turns "we handle most C" into a number.
+pub fn collect_unsupported(unit: &TranslationUnit) -> Vec<Unsupported> {
+    let mut out = Vec::new();
+    for function in &unit.functions {
+        for statement in &function.body.statements {
+            collect_in_statement(statement, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_in_statement(statement: &Statement, out: &mut Vec<Unsupported>) {
+    match &statement.kind {
+        StmtKind::Unsupported { kind } => out.push(Unsupported {
+            kind: kind.clone(),
+            span: statement.span,
+        }),
+        StmtKind::Declaration { value, .. } => {
+            if let Some(value) = value {
+                collect_in_expression(value, out);
+            }
+        }
+        StmtKind::Assign { lhs, rhs } => {
+            collect_in_expression(lhs, out);
+            collect_in_expression(rhs, out);
+        }
+        StmtKind::ExprStmt(expression) => collect_in_expression(expression, out),
+        StmtKind::Return(value) => {
+            if let Some(value) = value {
+                collect_in_expression(value, out);
+            }
+        }
+    }
+}
+
+fn collect_in_expression(expression: &Expression, out: &mut Vec<Unsupported>) {
+    match &expression.kind {
+        ExprKind::Unsupported { kind } => out.push(Unsupported {
+            kind: kind.clone(),
+            span: expression.span,
+        }),
+        ExprKind::BinaryOp { lhs, rhs, .. } => {
+            collect_in_expression(lhs, out);
+            collect_in_expression(rhs, out);
+        }
+        ExprKind::Call { args, .. } => {
+            for arg in args {
+                collect_in_expression(arg, out);
+            }
+        }
+        ExprKind::Variable(_) | ExprKind::Int(_) | ExprKind::String(_) => {}
     }
 }
 
