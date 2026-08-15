@@ -1,9 +1,16 @@
-//! CST → CAst.
-//! Translation only — no semantic rewriting happens here.
+//! Stage 1: CST → CAst.
+//!
+//! Translation only — no semantic rewriting happens here. Rewriting is
+//! [`crate::normalize`]'s job, and keeping the two apart is the point of the
+//! split: this module changes when the C *grammar* coverage changes, that one
+//! when a *rewrite* changes.
+//!
+//! Contract: total, never panics, never silently drops. Anything not modelled
+//! becomes an `Unsupported` node rather than nothing.
 
 use tree_sitter::{Node, Tree};
 
-use super::{
+use crate::cast::{
     BinOp, Compound, ExprKind, Expression, Function, Identifier, Item, ItemKind, Statement,
     StmtKind, TranslationUnit,
 };

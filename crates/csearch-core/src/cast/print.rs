@@ -183,7 +183,7 @@ pub(super) fn quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cast::build_translation_unit;
+    use crate::lower::build_translation_unit;
     use tree_sitter::Parser;
 
     fn lower(src: &str) -> TranslationUnit {

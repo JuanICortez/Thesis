@@ -1,7 +1,9 @@
 //! The C AST (`CAst`) — an owned, tree-sitter-independent representation of C.
 //!
-//! Stage 1 (`lower`) builds these types from a tree-sitter CST. Stage 2
-//! (`normalize`) rewrites them in place. Stage 3 (`abt`) lowers them into the
+//! This module is the tree and the two ways to render it ([`print`], [`dump`]);
+//! nothing here rewrites. The stages that do live beside it, one module per
+//! stage: [`crate::lower`] builds these types from a tree-sitter CST,
+//! [`crate::normalize`] rewrites them, and [`crate::abt`] lowers them into the
 //! e-graph language.
 //!
 //! Every node is a struct carrying a `kind` and a `Span`, so pattern matching
@@ -10,11 +12,9 @@
 //! make two occurrences of the same variable compare unequal.
 
 pub mod dump;
-pub mod lower;
 pub mod print;
 
 pub use dump::{dump, dump_with_spans};
-pub use lower::build_translation_unit;
 pub use print::print;
 
 use crate::span::Span;
