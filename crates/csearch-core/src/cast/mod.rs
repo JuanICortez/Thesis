@@ -9,9 +9,13 @@
 //! a name, not a node, and it is used as a hash key — giving it a span would
 //! make two occurrences of the same variable compare unequal.
 
+pub mod dump;
 pub mod lower;
+pub mod print;
 
+pub use dump::{dump, dump_with_spans};
 pub use lower::build_translation_unit;
+pub use print::print;
 
 use crate::span::Span;
 
@@ -120,9 +124,6 @@ pub struct Unsupported {
 }
 
 /// Walks a unit and reports everything lowering could not model.
-///
-/// Kept separate from lowering so the main path stays clean. Counting these
-/// over a corpus is what turns "we handle most C" into a number.
 pub fn collect_unsupported(unit: &TranslationUnit) -> Vec<Unsupported> {
     let mut out = Vec::new();
     for function in &unit.functions {

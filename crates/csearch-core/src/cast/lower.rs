@@ -1,7 +1,5 @@
-//! Stage 1: CST → CAst.
-//!
-//! Translation only — no semantic rewriting happens here. See
-//! `CST_TO_CAST_PLAN.md`.
+//! CST → CAst.
+//! Translation only — no semantic rewriting happens here.
 
 use tree_sitter::{Node, Tree};
 
@@ -165,6 +163,7 @@ impl<'a> ASTBuilder<'a> {
             self.unwrap_declarator(node.child_by_field_name("declarator")?)?;
 
         let params = match node.child_by_field_name("parameters") {
+            Some(param_list) if self.is_void_parameter_list(param_list) => Vec::new(),
             Some(param_list) => {
                 let mut param_identifiers = Vec::new();
                 let mut cursor = param_list.walk();
@@ -182,6 +181,23 @@ impl<'a> ASTBuilder<'a> {
             None => Vec::new(),
         };
         Some((name, params))
+    }
+
+    fn is_void_parameter_list(&self, param_list: Node) -> bool {
+        let mut cursor = param_list.walk();
+        let mut children = param_list.named_children(&mut cursor);
+
+        let Some(only) = children.next() else {
+            return false;
+        };
+        if children.next().is_some() || only.kind() != "parameter_declaration" {
+            return false;
+        }
+
+        only.child_by_field_name("declarator").is_none()
+            && only
+                .child_by_field_name("type")
+                .is_some_and(|node| self.extract_text(node) == "void")
     }
 
     fn build_statement(&self, node: Node) -> Vec<Statement> {
@@ -306,6 +322,7 @@ impl<'a> ASTBuilder<'a> {
     fn build_expression_kind(&self, node: Node) -> Option<ExprKind> {
         match node.kind() {
             "identifier" => Some(ExprKind::Variable(self.extract_identifier(node))),
+            "parenthesized_expression" => Some(self.build_expression(node.named_child(0)?).kind),
             "number_literal" => Some(ExprKind::Int(self.extract_number(node)?)),
             "binary_expression" => {
                 let lhs = node.child_by_field_name("left")?;
@@ -514,4 +531,3 @@ mod tests {
         }
     }
 }
-
