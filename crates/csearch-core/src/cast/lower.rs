@@ -4,8 +4,8 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    BinOp, Compound, ExprKind, Expression, Function, Identifier, Statement, StmtKind,
-    TranslationUnit,
+    BinOp, Compound, ExprKind, Expression, Function, Identifier, Item, ItemKind, Statement,
+    StmtKind, TranslationUnit,
 };
 use crate::span::Span;
 
@@ -110,19 +110,33 @@ impl<'a> ASTBuilder<'a> {
         let root = tree.root_node();
         assert_eq!(root.kind(), "translation_unit");
 
-        let mut functions = Vec::new();
+        let mut items = Vec::new();
         let mut cursor = root.walk();
 
         for child in root.named_children(&mut cursor) {
-            if child.kind() == "function_definition" {
-                if let Some(function) = self.build_function(child) {
-                    functions.push(function);
-                }
-            }
+            // A `function_definition` this cannot name — an unnamed parameter,
+            // a declarator too convoluted to unwrap — becomes `Unsupported`
+            // like any other top-level construct. Dropping it would understate
+            // coverage silently, which is the failure mode this stage exists
+            // to avoid.
+            let kind = match child.kind() {
+                "function_definition" => match self.build_function(child) {
+                    Some(function) => ItemKind::Function(function),
+                    None => self.unsupported_item_kind(child),
+                },
+                _ => self.unsupported_item_kind(child),
+            };
+            items.push(Item::new(kind, self.span(child)));
         }
         TranslationUnit {
-            functions,
+            items,
             span: self.span(root),
+        }
+    }
+
+    fn unsupported_item_kind(&self, node: Node) -> ItemKind {
+        ItemKind::Unsupported {
+            kind: node.kind().to_string(),
         }
     }
 
@@ -381,11 +395,15 @@ mod tests {
         build_translation_unit(&tree, src)
     }
 
+    fn first_function(unit: &TranslationUnit) -> &Function {
+        unit.functions().next().expect("a function definition")
+    }
+
     /// Regression: the C grammar field is `right`, not `rhs`.
     #[test]
     fn plain_assignment_lowers() {
         let unit = lower("int f() { int a; a = 2; }");
-        let stmts = &unit.functions[0].body.statements;
+        let stmts = &first_function(&unit).body.statements;
         match &stmts[1].kind {
             StmtKind::Assign { lhs, rhs } => {
                 assert!(matches!(&lhs.kind, ExprKind::Variable(Identifier(n)) if n == "a"));
@@ -399,7 +417,7 @@ mod tests {
     #[test]
     fn nested_declarators_lower() {
         let unit = lower("int f() { int *p; int a[10]; int **q; }");
-        let names: Vec<_> = unit.functions[0]
+        let names: Vec<_> = first_function(&unit)
             .body
             .statements
             .iter()
@@ -414,7 +432,7 @@ mod tests {
     #[test]
     fn pointer_parameters_lower() {
         let unit = lower("int f(int *x, int y) { return y; }");
-        let params: Vec<_> = unit.functions[0]
+        let params: Vec<_> = first_function(&unit)
             .params
             .iter()
             .map(|p| p.0.clone())
@@ -426,7 +444,7 @@ mod tests {
     fn spans_slice_back_to_source() {
         let src = "int f() { return 1 + 2; }";
         let unit = lower(src);
-        let ret = &unit.functions[0].body.statements[0];
+        let ret = &first_function(&unit).body.statements[0];
         assert_eq!(ret.span.slice(src), "return 1 + 2;");
         match &ret.kind {
             StmtKind::Return(Some(e)) => assert_eq!(e.span.slice(src), "1 + 2"),
@@ -439,7 +457,7 @@ mod tests {
     #[test]
     fn unmodelled_statements_become_unsupported() {
         let unit = lower("int f() { for (;;) { } goto end; }");
-        let kinds: Vec<_> = unit.functions[0]
+        let kinds: Vec<_> = first_function(&unit)
             .body
             .statements
             .iter()
@@ -455,7 +473,7 @@ mod tests {
     fn compound_assignment_is_unsupported_not_mistranslated() {
         let unit = lower("int f() { int a; a += 2; }");
         assert!(matches!(
-            &unit.functions[0].body.statements[1].kind,
+            &first_function(&unit).body.statements[1].kind,
             StmtKind::Unsupported { kind } if kind == "assignment_expression"
         ));
     }
@@ -463,7 +481,7 @@ mod tests {
     #[test]
     fn unmodelled_expressions_become_unsupported() {
         let unit = lower(r#"int f() { return "hi"; }"#);
-        match &unit.functions[0].body.statements[0].kind {
+        match &first_function(&unit).body.statements[0].kind {
             StmtKind::Return(Some(e)) => assert!(matches!(
                 &e.kind,
                 ExprKind::Unsupported { kind } if kind == "string_literal"
@@ -475,7 +493,7 @@ mod tests {
     #[test]
     fn integer_literals_parse_by_radix() {
         let unit = lower("int f() { int a = 0x1f; int b = 010; int c = 42u; int d = 1.5; }");
-        let values: Vec<_> = unit.functions[0]
+        let values: Vec<_> = first_function(&unit)
             .body
             .statements
             .iter()
@@ -506,6 +524,62 @@ mod tests {
                 ("string_literal", "\"x\""),
             ]
         );
+    }
+
+    // ---- Top-level items (step 4) ----
+
+    /// Globals, typedefs and preprocessor directives used to be dropped
+    /// without a trace, which was the one place stage 1 broke its own
+    /// no-silent-drops contract. They are now reported.
+    #[test]
+    fn top_level_constructs_are_reported_not_dropped() {
+        let src = "int g = 1;\ntypedef int myint;\nstruct S { int x; };\nint f(void) { return 1; }";
+        let unit = lower(src);
+
+        let kinds: Vec<_> = unit
+            .items
+            .iter()
+            .map(|item| match &item.kind {
+                ItemKind::Function(function) => format!("fn {}", function.name.0),
+                ItemKind::Unsupported { kind } => kind.clone(),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["declaration", "type_definition", "struct_specifier", "fn f"]
+        );
+
+        // And the diagnostics walker sees them, with spans that slice back.
+        let reported: Vec<_> = collect_unsupported(&unit)
+            .iter()
+            .map(|u| u.span.slice(src))
+            .collect();
+        // `struct_specifier` is the declaration's *type*, so its span stops
+        // before the `;` the other two include.
+        assert_eq!(
+            reported,
+            ["int g = 1;", "typedef int myint;", "struct S { int x; }"]
+        );
+    }
+
+    /// A function definition stage 1 cannot name — here, an unnamed parameter —
+    /// is an unsupported item rather than a missing one. Lowering it with the
+    /// wrong arity would be the worse answer.
+    #[test]
+    fn unnameable_function_definitions_are_unsupported_items() {
+        let unit = lower("void f(int) { }");
+        assert_eq!(unit.functions().count(), 0);
+        assert!(matches!(
+            &unit.items[0].kind,
+            ItemKind::Unsupported { kind } if kind == "function_definition"
+        ));
+    }
+
+    #[test]
+    fn functions_skips_unsupported_items_in_source_order() {
+        let unit = lower("typedef int a; int f(void) { } typedef int b; int g(void) { }");
+        let names: Vec<_> = unit.functions().map(|f| f.name.0.clone()).collect();
+        assert_eq!(names, ["f", "g"]);
     }
 
     /// The stage-1 contract: total, and never panics.

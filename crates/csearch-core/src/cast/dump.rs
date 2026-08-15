@@ -14,8 +14,8 @@
 //!    the thing under test.
 
 use super::{
-    BinOp, Compound, ExprKind, Expression, Function, Identifier, Statement, StmtKind,
-    TranslationUnit,
+    BinOp, Compound, ExprKind, Expression, Function, Identifier, Item, ItemKind, Statement,
+    StmtKind, TranslationUnit,
 };
 use crate::span::Span;
 
@@ -88,12 +88,24 @@ fn write_children(out: &mut String, node: &Node, prefix: &str) {
 }
 
 fn unit_node(unit: &TranslationUnit, spans: Spans) -> Node {
-    let functions = unit
-        .functions
+    let items = unit
+        .items
         .iter()
-        .map(|function| function_node(function, spans))
+        .map(|item| item_node(item, spans))
         .collect();
-    Node::new("TranslationUnit", unit.span, spans, functions)
+    Node::new("TranslationUnit", unit.span, spans, items)
+}
+
+/// A function `Item` renders as its `Function` directly. The two carry the same
+/// span and the same information, so a separate `Item` level would only add a
+/// line of noise to every dump.
+fn item_node(item: &Item, spans: Spans) -> Node {
+    match &item.kind {
+        ItemKind::Function(function) => function_node(function, spans),
+        ItemKind::Unsupported { kind } => {
+            Node::leaf(format!("Unsupported item {kind}"), item.span, spans)
+        }
+    }
 }
 
 fn function_node(function: &Function, spans: Spans) -> Node {
@@ -296,21 +308,24 @@ TranslationUnit
     fn string_literals_are_escaped() {
         let span = Span::new(0, 0);
         let unit = TranslationUnit {
-            functions: vec![Function {
-                name: Identifier("f".to_string()),
-                params: Vec::new(),
-                body: Compound {
-                    statements: vec![Statement::new(
-                        StmtKind::Return(Some(Expression::new(
-                            ExprKind::String("a\nb".to_string()),
+            items: vec![Item::new(
+                ItemKind::Function(Function {
+                    name: Identifier("f".to_string()),
+                    params: Vec::new(),
+                    body: Compound {
+                        statements: vec![Statement::new(
+                            StmtKind::Return(Some(Expression::new(
+                                ExprKind::String("a\nb".to_string()),
+                                span,
+                            ))),
                             span,
-                        ))),
+                        )],
                         span,
-                    )],
+                    },
                     span,
-                },
+                }),
                 span,
-            }],
+            )],
             span,
         };
 
@@ -354,5 +369,23 @@ TranslationUnit @0..25
     #[test]
     fn an_empty_unit_is_a_lone_root() {
         assert_eq!(dumped(""), "TranslationUnit\n");
+    }
+
+    /// Top-level constructs stage 1 does not model appear in the dump, in
+    /// source order, alongside the functions.
+    #[test]
+    fn unsupported_items_appear_beside_functions() {
+        assert_eq!(
+            dumped("typedef int myint;\nint x = 1;\nint f(void) { return 1; }"),
+            "\
+TranslationUnit
+├─ Unsupported item type_definition
+├─ Unsupported item declaration
+└─ Function f params: []
+   └─ Compound
+      └─ Return
+         └─ Int 1
+",
+        );
     }
 }

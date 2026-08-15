@@ -16,7 +16,7 @@
 
 use csearch_core::cast::{
     build_translation_unit, dump, print, Compound, ExprKind, Expression, Function, Identifier,
-    Statement, StmtKind, TranslationUnit,
+    Item, ItemKind, Statement, StmtKind, TranslationUnit,
 };
 use csearch_core::span::Span;
 use tree_sitter::Parser;
@@ -124,25 +124,28 @@ fn negative_literals_round_trip() {
     let negative = |value: i64| Expression::boxed(ExprKind::Int(value), span);
 
     let unit = TranslationUnit {
-        functions: vec![Function {
-            name: Identifier("f".to_string()),
-            params: Vec::new(),
-            body: Compound {
-                statements: vec![Statement::new(
-                    StmtKind::Return(Some(Expression::new(
-                        ExprKind::BinaryOp {
-                            op: csearch_core::cast::BinOp::Sub,
-                            lhs: negative(1),
-                            rhs: negative(-2),
-                        },
+        items: vec![Item::new(
+            ItemKind::Function(Function {
+                name: Identifier("f".to_string()),
+                params: Vec::new(),
+                body: Compound {
+                    statements: vec![Statement::new(
+                        StmtKind::Return(Some(Expression::new(
+                            ExprKind::BinaryOp {
+                                op: csearch_core::cast::BinOp::Sub,
+                                lhs: negative(1),
+                                rhs: negative(-2),
+                            },
+                            span,
+                        ))),
                         span,
-                    ))),
+                    )],
                     span,
-                )],
+                },
                 span,
-            },
+            }),
             span,
-        }],
+        )],
         span,
     };
 

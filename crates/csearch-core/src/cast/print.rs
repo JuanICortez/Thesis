@@ -39,7 +39,7 @@ pub fn print(unit: &TranslationUnit) -> Result<String, Vec<Unsupported>> {
     }
 
     let mut out = String::new();
-    for (index, function) in unit.functions.iter().enumerate() {
+    for (index, function) in unit.functions().enumerate() {
         if index > 0 {
             out.push('\n');
         }
@@ -255,6 +255,18 @@ mod tests {
             printed("int f(void) { int a; return; }"),
             "int f(void) {\n    int a;\n    return;\n}\n",
         );
+    }
+
+    /// A single unmodelled top-level construct makes the whole unit
+    /// unprintable. That is deliberate — there is no C text meaning "a typedef
+    /// we could not model" — but it does mean real-world files will usually
+    /// fail here, and `dump` is the tool for those.
+    #[test]
+    fn an_unsupported_item_makes_the_unit_unprintable() {
+        let unit = lower("typedef int myint; int f(void) { return 1; }");
+        let error = print(&unit).expect_err("typedefs are not modelled");
+        assert_eq!(error.len(), 1);
+        assert_eq!(error[0].kind, "type_definition");
     }
 
     /// The printer promises compilable C, so a tree that still holds an

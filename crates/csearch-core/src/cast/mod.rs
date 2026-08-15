@@ -24,8 +24,48 @@ pub struct Identifier(pub String);
 
 #[derive(Debug, Clone)]
 pub struct TranslationUnit {
-    pub functions: Vec<Function>,
+    pub items: Vec<Item>,
     pub span: Span,
+}
+
+/// A top-level construct. Anything that is not a function definition — a
+/// global, a `typedef`, a struct definition, a preprocessor directive — is
+/// [`ItemKind::Unsupported`] rather than absent, so the no-silent-drops
+/// contract holds at the top level too.
+#[derive(Debug, Clone)]
+pub struct Item {
+    pub kind: ItemKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ItemKind {
+    Function(Function),
+
+    /// See [`StmtKind::Unsupported`]. Note that a purely type-level construct
+    /// belongs here permanently, not as a gap to close: the CAst models no
+    /// types, so a `typedef` has nothing to lower *into*.
+    Unsupported {
+        kind: String,
+    },
+}
+
+impl Item {
+    pub fn new(kind: ItemKind, span: Span) -> Self {
+        Item { kind, span }
+    }
+}
+
+impl TranslationUnit {
+    /// The function definitions, in source order, skipping everything stage 1
+    /// could not model. Callers that need to know what was skipped should ask
+    /// [`collect_unsupported`] rather than walking `items` themselves.
+    pub fn functions(&self) -> impl Iterator<Item = &Function> {
+        self.items.iter().filter_map(|item| match &item.kind {
+            ItemKind::Function(function) => Some(function),
+            ItemKind::Unsupported { .. } => None,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -126,9 +166,17 @@ pub struct Unsupported {
 /// Walks a unit and reports everything lowering could not model.
 pub fn collect_unsupported(unit: &TranslationUnit) -> Vec<Unsupported> {
     let mut out = Vec::new();
-    for function in &unit.functions {
-        for statement in &function.body.statements {
-            collect_in_statement(statement, &mut out);
+    for item in &unit.items {
+        match &item.kind {
+            ItemKind::Unsupported { kind } => out.push(Unsupported {
+                kind: kind.clone(),
+                span: item.span,
+            }),
+            ItemKind::Function(function) => {
+                for statement in &function.body.statements {
+                    collect_in_statement(statement, &mut out);
+                }
+            }
         }
     }
     out
