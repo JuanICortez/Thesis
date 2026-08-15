@@ -15,9 +15,10 @@
 //! `lower`, `print`, and `dump` and only uses their public API.
 
 use csearch_core::cast::{
-    build_translation_unit, dump, print, Compound, ExprKind, Expression, Function, Identifier,
-    Item, ItemKind, Statement, StmtKind, TranslationUnit,
+    dump, print, Compound, ExprKind, Expression, Function, Identifier, Item, ItemKind, Statement,
+    StmtKind, TranslationUnit,
 };
+use csearch_core::lower::build_translation_unit;
 use csearch_core::span::Span;
 use tree_sitter::Parser;
 
